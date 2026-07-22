@@ -1,0 +1,69 @@
+-- Phoenix Retention feature extraction: call reason grouping, offer analysis, and disconnect/ARPC metrics
+-- Co-authored with CoCo
+--
+-- Classifies GenAI-extracted call reasons and agent offer outcomes, then joins
+-- to subscriber performance metrics to measure 30/60/90-day disconnect rates
+-- and ARPC (Average Revenue Per Customer) change.
+--
+-- Prerequisites:
+--   - A GenAI response table with columns: CALLREASON, OFFERFROMAGENT, FINALOUTPUT,
+--     CUSTOMER_KEY, DAILY_TIME_KEY
+--   - A subscriber performance metrics table with disconnect flags and MRC columns
+
+--------------------------------------------------------------------------------
+-- 1. Raw data preview
+--------------------------------------------------------------------------------
+SELECT *
+FROM <YOUR_DB>.<YOUR_SCHEMA>.GENAI_RETENTION_RESPONSES;
+
+--------------------------------------------------------------------------------
+-- 2. Feature extraction with disconnect and ARPC metrics
+--------------------------------------------------------------------------------
+WITH base AS (
+    SELECT
+        a.*,
+        bios.DISCONNECT_FLAG_30_DAYS,
+        bios.DISCONNECT_FLAG_60_DAYS,
+        bios.DISCONNECT_FLAG_90_DAYS,
+        bios.TOTAL_NET_MRC_CURR,
+        bios.TOTAL_NET_MRC_30_DAYS,
+        bios.TOTAL_NET_MRC_30_DAYS - bios.TOTAL_NET_MRC_CURR AS ARRPC_CHANGE_30D,
+
+        CASE
+            WHEN CONTAINS(CALLREASON, 'Want to Disconnect')       THEN 'WantToDisconnect'
+            WHEN CONTAINS(CALLREASON, 'Billing/Charge Question')  THEN 'Billing/Charge'
+            WHEN CONTAINS(CALLREASON, 'Dissatisfied with Service') THEN 'Dissatisfied with Service'
+            ELSE 'Other'
+        END AS call_reason_group,
+
+        CASE
+            WHEN CONTAINS(OFFERFROMAGENT, 'YES') THEN 'Yes'
+            WHEN CONTAINS(OFFERFROMAGENT, 'NO')  THEN 'No'
+            ELSE 'Other'
+        END AS offer_group,
+
+        CASE
+            WHEN CONTAINS(FINALOUTPUT, 'Want')    THEN 'WantToLeave'
+            WHEN CONTAINS(FINALOUTPUT, 'Took')    THEN 'TookOffer'
+            WHEN CONTAINS(FINALOUTPUT, 'Nothing') THEN 'NothingChanged'
+            ELSE 'n/a'
+        END AS final_output_group
+
+    FROM <YOUR_DB>.<YOUR_SCHEMA>.GENAI_RETENTION_RESPONSES AS a
+    LEFT JOIN <YOUR_DB>.<YOUR_SCHEMA>.SUBS_CAMPAIGN_PERFORMANCE_METRICS AS bios
+        ON bios.CUSTOMER_KEY = a.CUSTOMER_KEY
+        AND bios.DAILY_TIME_KEY = a.DAILY_TIME_KEY
+)
+SELECT
+    call_reason_group,
+    offer_group,
+    final_output_group,
+    COUNT(*)                      AS row_count,
+    SUM(DISCONNECT_FLAG_30_DAYS)  AS disconnect_flag_30_days,
+    SUM(DISCONNECT_FLAG_60_DAYS)  AS disconnect_flag_60_days,
+    SUM(DISCONNECT_FLAG_90_DAYS)  AS disconnect_flag_90_days,
+    SUM(TOTAL_NET_MRC_CURR)       AS total_net_mrc_curr,
+    SUM(TOTAL_NET_MRC_30_DAYS)    AS total_net_mrc_30_days,
+    SUM(ARRPC_CHANGE_30D)         AS arrpc_change_30d
+FROM base
+GROUP BY ALL;
